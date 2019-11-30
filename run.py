@@ -67,7 +67,7 @@ def angr_insn_after(state):
     """
     eax = state.solver.eval(state.regs.eax)
     edx = state.solver.eval(state.regs.edx)
-    print(f"                eax {state.regs.eax} == 0x{eax:x}, edx = {state.regs.edx} == 0x{edx:x}\n")
+    print(f"                eax  0x{eax:x}, edx 0x{edx:x}\n")
 
     #if state.addr == 0x8048461 # Why didn't EAX change???
 
@@ -79,11 +79,36 @@ def jit_store(state):
     addr_c = state.solver.eval(addr) # XXX: what 
     l = state.inspect.mem_read_length
     # Could use claripy solver to check for multiple concrete values
-    concrete_val = panda.virtual_memory_read(g_env, addr_c, l)
-    int_val = int.from_bytes(concrete_val, byteorder='little')
+    concrete_byte_val = panda.virtual_memory_read(g_env, addr_c, l)
+    byte_int_val = int.from_bytes(concrete_byte_val, byteorder='little')
+    if l == 1:
+        mask = 0xFF
+    elif l == 4:
+        mask = 0xFFFFFFFF
+    else:
+        raise RuntimeError("No mask for length {l}")
 
-    print(f"JIT STORE to address {addr}==0x{addr_c:x} pandavalue=0x{int_val:x}")
-    state.memory.store(addr_c, int_val) # Set the value
+    int_val = byte_int_val&mask
+
+    # Mask int_val to only be of length l bytes
+
+    if addr_c == 0x8607C09:
+        print(f"MAKE SYMBOLIC AT 0x{addr_c:x} instead of 0x{int_val:x} (len: {l})")
+        # None of the following things work, instead we just use angr's built-in handling
+        # of unknown values which prints a warning (useful for debugging) the first time we hit this case
+        #name = f"panda_uncons_0x{addr_c:x}"
+        #unc = state.memory.get_unconstrained_bytes(name, l, inspect=False)
+        #state.memory.store(addr_c, unc) # Set to be unconstrained
+
+        # Hardcode a junk value to the address, then replace it with symbolic data
+        #state.memory.store(addr_c, 0, inspect=False) # XXX: This doesn't take into account length?
+        #state.memory.make_symbolic(name, addr_c, l)
+
+        #state.solver.Unconstrained(name, bits=l*8, key=('panda_uncon', addr_c), inspect=False, events=False)
+
+    else:
+        print(f"JIT STORE to address {addr}==0x{addr_c:x} pandavalue=0x{int_val:x} len: {l}")
+        state.memory.store(addr_c, int_val) # Set the value
 
 def do_jit(state):
     '''
@@ -94,6 +119,7 @@ def do_jit(state):
     addr_c = state.solver.eval(addr)
 
     angr_mem = state.memory.mem.load_objects(addr_c, l)
+
     return len(angr_mem)==0
 """
 def should_break(state):
@@ -351,12 +377,14 @@ def do_angr(panda, env, pc):
 
     simgr = project.factory.simulation_manager(start_state)
 
+    """
     # Just step a single BB
     for i in range(5):
         print(f"\nStep simulation {i}th time")
         simgr.step()
     d()
     return
+    """
 
     # Explore to find a way to get to FIND_ADDR while avoiding AVOID
     simgr.explore(find=FIND_ADDR, avoid=[AVOID])
