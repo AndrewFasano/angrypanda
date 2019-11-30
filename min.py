@@ -5,18 +5,19 @@ import capstone
 from ipdb import set_trace as d
 
 START_PC = 0x4000
-EXPLORE_GOAL=START_PC+0xE # Address to find with angr
+EXPLORE_GOAL  = START_PC + 0xE # Address to find with angr
+EXPLORE_AVOID = START_PC + 0x10 # Address to avoid
 sym_addr = 0xFFFF # Address to leave as symbolic
 shellcode  = [b"mov eax, 0xcccc",          # +0x00
               b"mov ebx, DWORD PTR [eax]", # +0x05
               b"mov ecx, DWORD PTR [ebx]", # +0x07
               b"cmp ecx, 0x45",            # +0x09
-              b"jne 0x400F",               # +0x0C
-              b"nop",                      # +0x0E
-              b"jmp 0x400F",               # +0x0F # Loop forever.
-              b"nop",                      # When angr looks ahead,
-              b"nop",                      # make sure we always
-              b"nop",                      # have concrete instructions
+              b"jne 0x4010",               # +0x0C
+              b"jmp 0x4011",               # +0x0E Only hit when mem:0xFFFF==0x45
+              b"nop",                      # +0x10 Only hit when mem0xFFFF!=0x45
+              b"nop",                      # +0x11 hit always
+              b"nop",                      # Junk so angr doesn't
+              b"nop",                      # think there are symbolic insns
               ]
 
 # Shellcode will read memory at 0xCCCC, which we'll populate to be 0xFFFF through a breakpoint (JIT)
@@ -55,8 +56,9 @@ def jit_store(state):
     l = state.inspect.mem_read_length
 
     # Could use claripy solver to check for multiple concrete values
-    concrete_byte_val = bytes([0xff, 0xff, 0, 0]) #panda.virtual_memory_read(g_env, addr_c, l)
-    byte_int_val = int.from_bytes(concrete_byte_val, byteorder='little')
+    concrete_byte_val = bytes([0, 0, 0xff, 0xff]) #panda.virtual_memory_read(g_env, addr_c, l)
+    byte_int_val = int.from_bytes(concrete_byte_val, byteorder='big') # XXX: keep as big endian here! We'll swap
+                                                                      #      to little endian (if needed) later.
     if l == 1:
         mask = 0xFF
     elif l == 4:
@@ -67,14 +69,10 @@ def jit_store(state):
 
 
     if addr_c == sym_addr:
-        print(f"JIT IGNORE: leave {l} bytes unconstrained at mem:0x{int_val}") # XXX: Do nothing - Use angr's default fallback
+        print(f"JIT IGNORE: leave {l} bytes unconstrained at mem:0x{int_val:x}") # XXX: Do nothing - Use angr's default fallback
     else:
         print(f"JIT STORE: save value=0x{int_val:x} (len {l}) to address mem:0x{addr_c:x}")
-        state.memory.store(addr_c, int_val, size=4) # Set the value
-
-        # XXX: If we don't do this, the value isn't actually changed??? What??
-        v = state.memory.load(addr_c)
-        #assert(state.solver.eval(v) == int_val)
+        state.memory.store(addr_c, int_val, size=4, endness="Iend_LE") # Set the value
 
 def do_jit(state):
     '''
@@ -108,7 +106,7 @@ def angr_insn_exec(state):
 
     op_bytes = b"".join([bytes([x]) for x in ops])
     for i in md.disasm(op_bytes, state.inspect.instruction):   
-        print("0x%x:\t%s\t%s\t(%d bytes)" %(i.address, i.mnemonic, i.op_str, len(i.bytes)))
+        print("0x%x:\t%s\t%s" %(i.address, i.mnemonic, i.op_str))
         break
 
 start_state.inspect.b('instruction', action=angr_insn_exec, when=angr.BP_BEFORE)
@@ -116,17 +114,17 @@ start_state.inspect.b('mem_read', condition=do_jit, action=jit_store, when=angr.
 
 simgr = proj.factory.simgr(start_state)
 
-simgr.explore(find=EXPLORE_GOAL)
+simgr.explore(find=EXPLORE_GOAL,avoid=[EXPLORE_AVOID])
 
 # After exploration we should have one item in `found` stash and one that's still active
-assert(len(simgr.active)), "Nothing in active stash"
 assert(len(simgr.found)),  "Nothing in found stash"
+assert(len(simgr.avoid)), "Nothing in avoid stash"
 
-print(f"\nEvaluating mem:0x{sym_addr:x} in active state...")
-active = simgr.active[0]
-active_mem = active.memory.load(sym_addr, 1)
-active_conc = active.solver.eval(active_mem)
-print(f"mem:0x{sym_addr:x} = 0x{active_conc:x} in active state...")
+print(f"\nEvaluating mem:0x{sym_addr:x} in avoid state...")
+avoid = simgr.avoid[0]
+avoid_mem = avoid.memory.load(sym_addr, 1)
+avoid_conc = avoid.solver.eval(avoid_mem)
+print(f"mem:0x{sym_addr:x} = 0x{avoid_conc:x} in avoid state...")
 
 print(f"\nEvaluating mem:0x{sym_addr:x} in found state...")
 found = simgr.found[0]
@@ -134,6 +132,6 @@ found_mem = found.memory.load(sym_addr, 1)
 found_conc = found.solver.eval(found_mem)
 print(f"mem:0x{sym_addr:x} = 0x{found_conc:x} in found state...")
 
-assert(active_conc != 0x45), "Active state incorrectly has soln value"
+assert(avoid_conc != 0x45), "Avoid state incorrectly has soln value"
 assert(found_conc == 0x45), "Found state doesn't have soln value"
 print(f"Success, found state has solution value of 0x{found_conc:x}")
