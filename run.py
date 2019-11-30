@@ -45,6 +45,8 @@ AVOID      = 0x8048489 # Moves 0 into eax just before ret
 START_MAIN = mappings['main']
 END_MAIN   = 0x8048495 # Main's ret
 
+buffer_addr = None # Dynamically identified - Address of buffer returned from malloc
+
 def angr_insn_exec(state):
     """
     Debug callback - Print before each instruction we execute
@@ -65,11 +67,11 @@ def angr_insn_after(state):
     """
     Debug callback - Print after
     """
-    eax = state.solver.eval(state.regs.eax)
-    edx = state.solver.eval(state.regs.edx)
-    print(f"                eax  0x{eax:x}, edx 0x{edx:x}\n")
+    #eax = state.solver.eval(state.regs.eax)
+    #edx = state.solver.eval(state.regs.edx)
+    #print(f"                eax  0x{eax:x}, edx 0x{edx:x}\n")
 
-    #if state.addr == 0x8048461 # Why didn't EAX change???
+    print("-------")
 
 def jit_store(state):
     '''
@@ -80,7 +82,8 @@ def jit_store(state):
     l = state.inspect.mem_read_length
     # Could use claripy solver to check for multiple concrete values
     concrete_byte_val = panda.virtual_memory_read(g_env, addr_c, l)
-    byte_int_val = int.from_bytes(concrete_byte_val, byteorder='little')
+    byte_int_val = int.from_bytes(concrete_byte_val, byteorder='big') # XXX: keep as big endian here! We'll swap
+                                                                      #      to little endian (if needed) later.
     if l == 1:
         mask = 0xFF
     elif l == 4:
@@ -92,7 +95,9 @@ def jit_store(state):
 
     # Mask int_val to only be of length l bytes
 
-    if addr_c == 0x8607C09:
+    global buffer_addr
+    assert(buffer_addr is not None), "Unset addr buffer"
+    if addr_c in range(buffer_addr, buffer_addr+4):
         print(f"MAKE SYMBOLIC AT 0x{addr_c:x} instead of 0x{int_val:x} (len: {l})")
         # None of the following things work, instead we just use angr's built-in handling
         # of unknown values which prints a warning (useful for debugging) the first time we hit this case
@@ -107,8 +112,8 @@ def jit_store(state):
         #state.solver.Unconstrained(name, bits=l*8, key=('panda_uncon', addr_c), inspect=False, events=False)
 
     else:
-        print(f"JIT STORE to address {addr}==0x{addr_c:x} pandavalue=0x{int_val:x} len: {l}")
-        state.memory.store(addr_c, int_val) # Set the value
+        print(f"JIT STORE to address {addr}==0x{addr_c:x} pandavalue=0x{int_val:x} len: {l}") # XXX: prints backwards, but stores okay
+        state.memory.store(addr_c, int_val, endness="Iend_LE") # Set the value
 
 def do_jit(state):
     '''
@@ -121,142 +126,12 @@ def do_jit(state):
     angr_mem = state.memory.mem.load_objects(addr_c, l)
 
     return len(angr_mem)==0
-"""
-def should_break(state):
-    addr_bv = state.inspect.mem_read_address
-    addr = state.solver.eval(addr_bv)
-
-    print(f"\nDECISION: How to handle data at 0x{addr:x}")
-    #print(f"\tBV Concrete: {addr_bv.concrete}")
-    ptr_dest = state.memory.load(addr, state.inspect.mem_read_length, disable_actions=True, inspect=False)
-    #if addr == 0xBfB6B51C:
-    #    d()
-
-    # The address being read isn't concrete. Yikes XXX how to handle
-    if not addr_bv.concrete:
-        #print("\tYIKES - Non-concrete address - copy from gueest??", addr_bv)
-        return True
-
-    # Some/All of the read is not concrete - XXX: Make sure to not recurse
-    if not state.memory.load(addr, state.inspect.mem_read_length, disable_actions=True, inspect=False).concrete:
-        #print(f"Reading missing data at 0x{addr:x} ({state.inspect.mem_read_length} bytes)")
-        #print(f"\tReading non-concrete data - Copy from guest")
-        return True
-
-    # It's all concrete
-    #print(f"\tReading angr's concrete data at 0x{addr:x}")
-    return False
-
-def mem_read_pre(state):
-    print("MEM_READ_PRE")
-    return
-
-    print(state)
-    d()
-    addr_bv = state.inspect.mem_read_address # XXX: How to get addr?
-    addr = state.solver.eval(addr_bv)
-    byte_length = state.inspect.mem_read_length
-
-    concrete_val = panda.virtual_memory_read(env, addr, byte_length) # Safe - reading panda memory, no recusion
-    int_val = int.from_bytes(concrete_val, byteorder='little')
-
-    #state.solver.add(state.inspect.mem_read_expr == int_val)
-
-def should_break_pre(state):
-    '''
-    Given an address we're about to read, determine if it's symbolic. If it is, and it's NOT the one we want to be symbl
-    then call mem_read_pre to copy real PANDA data into our state
-    '''
-
-    addr = state.solver.eval(state.inspect.mem_read_address)
-
-    if addr == 0xBFB6B514:
-        print("XXX: HARDCODED ADDR TO LEAVE SYMBOLIC")
-        return False
-    '''
-    expr = state.inspect.mem_read_expr
-
-    if not expr:
-        print(f"XXX: Unknown expr, addr = 0x{addr:x}")
-    else:
-        # First chewck if expr is uninit
-        if expr.uninitialized:
-            print("Expression unitialized - Load from PANDA memory")
-            return True
-    '''
-
-    angr_mem = state.memory.mem.load_objects(addr, state.inspect.mem_read_length) # Maybe len*4?
-    #print("ANGR_MEM:", angr_mem)
-    if not len(angr_mem):
-        print(f"Angr mem empty at 0x{addr:x}")
-        return True
-
-    assert(len(angr_mem) == 1), "Not sure what's going on, multiple angr mem states"
-
-    '''
-    if isinstance(angr_mem[0][1].object.args[0], int):
-        return False
-
-    if isinstance(angr_mem[0][1].object.args[0], claripy.ast.bv.BV):
-        print("XXX what")
-        return True # XXX Not sure what's going on?
-
-    if angr_mem[0][1].object.args[0].unitialized:
-        print(f"0x{addr:x} points ot unitialized memory. Construct something from PANDA memory!")
-        return True
-    '''
-
-
-'''
-if isinstance(angr_mem[0][1].object, claripy.ast.bv.BV):
-    # It's a bitvector
-    if isinstance(angr_mem[0][1].object.args[0], claripy.ast.bv.BV): # Arg is also a BV
-        print("ARG BV")
-        return False
-
-    if angr_mem[0][1].object.uninitialized:
-       print("Uninitialized bitvector")
-       return True # XX???
-'''
-
-return False
-
-def mem_read(state):
-    '''
-    On uninitialized memory reads, pull in concrete values from panda
-    '''
-    global mapped
-    addr_bv = state.inspect.mem_read_address
-    addr = state.solver.eval(addr_bv)
-    byte_length = state.inspect.mem_read_length
-    print(f"\tmem_read handler addr=0x{addr:x}, addr_bv = {addr_bv}")
-
-    concrete_val = panda.virtual_memory_read(env, addr, byte_length) # Safe - reading panda memory, no recusion
-    int_val = int.from_bytes(concrete_val, byteorder='little')
-
-    #if addr == 0xBFB6B51C:
-    #    print(f"Leave symbolic data at 0x{addr:x} isntead of PANDA's 0x{int_val:x}")
-    #    return
-
-    if int_val == 0x41:
-        print("XXX: SKIP 41, leave symbolic")
-        return
-
-    print(f"\tSYNC MEMORY: set 0x{addr:x} = 0x{int_val:x}, len={byte_length}")
-    #state.memory.store(addr=addr, data=int_val)
-    state.solver.add(state.inspect.mem_read_expr == int_val)
-
-
-"""
-
-mem_reads = set()
 
 def should_copy(state):
     """
     Return true if the current instruction is going to try reading uninit memory
     and we need to copy it (For now we ignore the case when we want to leave it as symbolic)
     """
-    global mem_reads
 
     read_addr = state.inspect.mem_read_address
     if isinstance(read_addr, claripy.ast.bv.BV) and \
@@ -268,15 +143,6 @@ def should_copy(state):
 
     addr = state.solver.eval(read_addr)
     angr_mem = state.memory.mem.load_objects(addr, state.inspect.mem_read_length)
-    #print(f"\tRead from memory {state.inspect.mem_read_address} => 0x{addr:x}")
-    mem_reads.add(addr)
-
-    if addr == 0: # Debug, it should be init
-        d()
-
-    #if addr == 0xBFB6B514: # This is the address of the POINTER to our buffer
-    #    print("XXX: HARDCODED ADDR TO LEAVE SYMBOLIC")
-    #    return False
 
     if not len(angr_mem): # Memory missing from angr, need to populate it
         print(f"\tReading without angr memory from 0x{addr:x}, {state.inspect.mem_read_length} bytes")
@@ -301,24 +167,10 @@ def mem_read_pre(state):
     state.memory.store(addr, int_val)
     d()
 
-
-@blocking
-def run_foo():
-    panda.record_cmd("toy/foo; echo $?", copy_directory="toy", recording_name="foo.recording")
-    panda.stop_run()
-
-if not path.isfile("foo.recording-rr-nondet.log"):
-    print("Generating new recording...")
-    panda.queue_async(run_foo)
-    panda.run()
-    print("Done!")
-
-
 @panda.cb_insn_translate(procname="foo") # Only trigger insn_exec when we're in foo's main
-def ret_true(env, tb):
+def in_foo(env, tb):
     pc = panda.current_pc(env)
     return pc >= START_MAIN  and pc <= END_MAIN
-
 
 def do_angr(panda, env, pc):
     """
@@ -349,17 +201,16 @@ def do_angr(panda, env, pc):
     # For now just map in the rest of main
     obj = cle.backends.Blob(mem)
     project.loader.add_object(obj, pc)
-
-    d()
     """
 
     # Explore
     start_state = project.factory.blank_state(addr=pc)
+    #start_state.options.add(ANGR.SYMBOL_FILL_UNCONSTRAINED_MEMORY)
 
     # Copy concrete registers into angr from panda
     for (angr_reg, panda_reg) in zip([x.lower() for x in registers.keys()], registers.values()):
         val = env.env_ptr.regs[panda_reg]
-        print(f"Set {angr_reg} = 0x{val:x}")
+        #print(f"Set {angr_reg} = 0x{val:x}")
         setattr(start_state.regs, angr_reg, val)
 
     # Debugging, print at start and end of simulating each instruction
@@ -372,51 +223,61 @@ def do_angr(panda, env, pc):
     start_state.inspect.b('mem_read', condition=do_jit, action=jit_store,
                             when=angr.BP_BEFORE)
 
-    #start_state.memory.store(0xbf982714, 0x41414141) # XXX TEST - POINTER ADDRESS
-    #start_state.memory.store(0x97c6008, 0x12345678) # XXX TEST - POINTER VAL
-
     simgr = project.factory.simulation_manager(start_state)
-
-    """
-    # Just step a single BB
-    for i in range(5):
-        print(f"\nStep simulation {i}th time")
-        simgr.step()
-    d()
-    return
-    """
 
     # Explore to find a way to get to FIND_ADDR while avoiding AVOID
     simgr.explore(find=FIND_ADDR, avoid=[AVOID])
 
-    """
-    print("mem_reads:")
-    for addr in sorted(mem_reads):
-        print(hex(addr))
-    """
-
-    if not len(simgr.found):
-        print("All failure :(")
-        d()
-        return
+    assert(len(simgr.found)), d()
 
     final_state = simgr.found[0]
+    """
+    # Bad representation of buffer, combines each byte into the constraints on the whole 4-byte object
     for const in final_state.solver.constraints:
+        print(const.args[1])
         for x in final_state.solver.describe_variables(const):
             print(x[0], hex(x[1]), const.op, hex(final_state.solver.eval(const.args[1])))
-    d()
+    """
+    buf = final_state.memory.load(buffer_addr, 4)
+    soln = final_state.solver.eval(buf)
+    soln_s = ''.join(chr((soln>>8*(4-byte-1))&0xFF) for byte in range(4))
+
+    print("Solution:", hex(soln), soln_s)
+    soln_sum = sum([ord(x) for x in soln_s])
+    assert(soln_sum == 0x108), "Invalid solution"
+
+    return soln_s
 
 @panda.cb_insn_exec
 def insn_exec(env, pc): # Only called for main
-    #print("INSTRUMENTED:", hex(pc))
-    if pc == 0x8048468:
+    global buffer_addr
+    if pc == 0x8048426:
         eax = env.env_ptr.regs[R_EAX]
-        print("BUFFER IS AT", hex(eax))
+        # flip from LE to normal
+        buffer_addr = int.from_bytes((eax).to_bytes(4, byteorder='big'), byteorder='little')
 
     if pc == START_ANGR:
-        print(f"START ANGR from 0x{pc:x}")
-        do_angr(panda, env, pc)
+        print(f"Start angr from 0x{pc:x}")
+        #res = do_angr(panda, env, pc) # Get solution from angr
+        res = "{l!\x00" # XXX: Debugging
+        print("Solution:", res)
+
+        buf = [bytes([ord(x)]) for x in res]
+        r = panda.virtual_memory_write(env, buffer_addr,  buf) # Write solution into buffer
+
+        if r == -1: # XXX WHY DOES THIS FAIL?
+            print("ERROR WRITING")
+        d()
 
     return 0
 
-panda.run_replay("foo.recording")
+@blocking
+def run_foo():
+    panda.revert_sync("root")
+    panda.copy_to_guest("toy")
+    res = panda.run_serial_cmd("toy/foo; echo \\\"Solved=$?\\\"")
+    print("Result:", res)
+    panda.stop_run()
+
+panda.queue_async(run_foo)
+panda.run()
