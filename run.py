@@ -79,9 +79,15 @@ def jit_store(state):
     '''
     addr = state.inspect.mem_read_address
     addr_c = state.solver.eval(addr) # XXX: what 
+
+    # We get little endian value from angr (if it's a LE arch). 
+    # Flip to normal so we can compare against buffer address and print sane outputs
+    #addr_c_noend = int.from_bytes((addr_c).to_bytes(4, byteorder='big'), byteorder='little')
+    addr_c_noend = addr_c
+
     l = state.inspect.mem_read_length
     # Could use claripy solver to check for multiple concrete values
-    concrete_byte_val = panda.virtual_memory_read(g_env, addr_c, l)
+    concrete_byte_val = panda.virtual_memory_read(g_env, addr_c_noend, l)
     byte_int_val = int.from_bytes(concrete_byte_val, byteorder='big') # XXX: keep as big endian here! We'll swap
                                                                       #      to little endian (if needed) later.
     if l == 1:
@@ -97,8 +103,8 @@ def jit_store(state):
 
     global buffer_addr
     assert(buffer_addr is not None), "Unset addr buffer"
-    if addr_c in range(buffer_addr, buffer_addr+4):
-        print(f"MAKE SYMBOLIC AT 0x{addr_c:x} instead of 0x{int_val:x} (len: {l})")
+    if addr_c_noend in range(buffer_addr, buffer_addr+4):
+        print(f"MAKE SYMBOLIC AT 0x{addr_c_noend:x} instead of 0x{int_val:x} (len: {l})")
         # None of the following things work, instead we just use angr's built-in handling
         # of unknown values which prints a warning (useful for debugging) the first time we hit this case
         #name = f"panda_uncons_0x{addr_c:x}"
@@ -112,7 +118,7 @@ def jit_store(state):
         #state.solver.Unconstrained(name, bits=l*8, key=('panda_uncon', addr_c), inspect=False, events=False)
 
     else:
-        print(f"JIT STORE to address {addr}==0x{addr_c:x} pandavalue=0x{int_val:x} len: {l}") # XXX: prints backwards, but stores okay
+        print(f"JIT STORE to address {addr}==0x{addr_c_noend:x} pandavalue=0x{int_val:x} len: {l}")
         state.memory.store(addr_c, int_val, endness="Iend_LE") # Set the value
 
 def do_jit(state):
@@ -253,17 +259,21 @@ def insn_exec(env, pc): # Only called for main
     global buffer_addr
     if pc == 0x8048426:
         eax = env.env_ptr.regs[R_EAX]
+        #buffer_addr = eax
+        #print(f"Buffer NORM is at 0x{buffer_addr:x}")
         # flip from LE to normal
         buffer_addr = int.from_bytes((eax).to_bytes(4, byteorder='big'), byteorder='little')
+        print(f"Buffer LE is at 0x{buffer_addr:x}")
 
     if pc == START_ANGR:
         print(f"Start angr from 0x{pc:x}")
-        #res = do_angr(panda, env, pc) # Get solution from angr
-        res = "{l!\x00" # XXX: Debugging
+        res = do_angr(panda, env, pc) # Get solution from angr
+        #res = "{l!\x00" # XXX: Debugging
         print("Solution:", res)
 
         buf = [bytes([ord(x)]) for x in res]
-        r = panda.virtual_memory_write(env, buffer_addr,  buf) # Write solution into buffer
+        buffer_addr_be = int.from_bytes((buffer_addr).to_bytes(4, byteorder='big'), byteorder='little')
+        r = panda.virtual_memory_write(env, buffer_addr_be,  buf) # Write solution into buffer
 
         if r == -1: # XXX WHY DOES THIS FAIL?
             print("ERROR WRITING")
