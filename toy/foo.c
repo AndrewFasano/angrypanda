@@ -1,29 +1,34 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 
 int main(int argc, char** argv) {
 
-  char* buf = (char*)malloc(4); // Allocate 4 bytes of junk data
-  buf[0] = (char)0x41;
-  buf[1] = (char)0x41;
-  buf[2] = (char)0x41;
-  buf[3] = (char)0x41;
-  // Initialize to AAAA
-
-  //printf("Buffer is at %p\n", &buf);
-
-  //XXX Here we need to run with symbolic buffer
-  __asm("nop");
+  if (argc < 2) {
+    printf("USAGE %s [answer]\n", argv[0]);
+    return 1;
+  }
 
   int sum = 0;
-  for (int i=0; i < 4; i++) {
+  int len = strlen(argv[1]);
+  char* buf = (char*)malloc(strlen(argv[1]));
+
+  // Hook on return from malloc (BB), capture buf
+  for (int i=0; i < len; i++) {
+    buf[i] = argv[1][i];
+  }
+
+  printf("Buffer contains: %s\n", buf);
+  //Angr should start from after this print
+  for (int i=0; i < len; i++) {
     sum += (int)buf[i];
   }
 
-  //printf("Sum is %d\n", sum);
-  if (sum == 0x42*4) {
-    return 1;
+  if (sum == 0x108) { // 'BBBB' is valid
+    printf("Success :)\n");
+  }else{
+    printf("Failure :(\n");
   }
 
   return 0;
