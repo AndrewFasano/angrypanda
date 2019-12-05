@@ -8,38 +8,36 @@
 # TODO: Support for longer input buffers
 #       JIT mapping of code buffers
 
-from sys import argv
+from sys import argv, stdout
 from os import path
 import capstone
 import angr
 import claripy
 import struct
+import logging
 
 from panda import Panda, ffi, blocking
 from panda.x86.helper import *
-from ipdb import set_trace as d
-
+from io import BytesIO
 from elftools.elf.elffile import ELFFile
 from elftools.elf.sections import SymbolTableSection
+from ipdb import set_trace as d
 
 panda = Panda(generic="i386")
-md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
-buffer_addr = None # Dynamically identified, address of buffer returned from malloc
 
-mappings = {}
-with open(path.join("toy", "foo"), 'rb') as f:
-    our_elf = ELFFile(f)
-    for section in our_elf.iter_sections():
-        if not isinstance(section, SymbolTableSection): continue
-        for symbol in section.iter_symbols():
-            if len(symbol.name): # Sometimes empty
-                mappings[symbol.name] = symbol['st_value']
+logging.basicConfig(format='%(levelname)-7s | %(asctime)-23s | %(name)-8s | %(message)s')
+logger = logging.getLogger('angrypanda')
+logger.setLevel('DEBUG')
+md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+progname="crackme"
+buffer_addr = None # Dynamically identified, address of buffer returned from malloc
+found_input = None # Dynamically computed during first run
+g_env = None # PANDA environment as a global
 
 BUFFER_SET = 0x804850f # After malloc
 START_ANGR = 0x8048554 # After buf is populated
 FIND_ADDR  = 0x8048589 # Before print success
 AVOID      = 0x80485a0 # Before print failure
-START_MAIN = mappings['main']
 END_MAIN   = 0x80485b6 # Main's ret
 
 def angr_insn_exec(state):
@@ -69,7 +67,6 @@ def int_to_str(x):
         s = s[2:]
     return ret
 
-g_env = None
 def jit_store(state):
     '''
     Immediately before angr reads new data from memory,
@@ -83,16 +80,19 @@ def jit_store(state):
 
     read_len = state.inspect.mem_read_length
     concrete_byte_val = panda.virtual_memory_read(g_env, addr_c, read_len)
-    byte_int_val = int.from_bytes(concrete_byte_val, byteorder='big') # XXX: Never flip endianness here
+    byte_int_val = int.from_bytes(concrete_byte_val, byteorder='big') # XXX: Never flip endianness here so we mask correctly
 
     assert(read_len <= 4), "Unsupported read of multiple bytes"
-    int_val = byte_int_val & (0xFFFFFFFF>>(4-read_len))               # If endianness changed, this would fail
+    int_val = byte_int_val & (0xFFFFFFFF>>(4-read_len))               # If we flipped endianness, this would be backwards
 
     assert(buffer_addr is not None), "Buffer address is unset"
     if addr_c in range(buffer_addr, buffer_addr+4):
-        print(f"MAKE SYMBOLIC AT 0x{addr_c:x} instead of 0x{int_val:x} (len: {read_len})")
+        logger.info(f"Create unconstrainted symbolic data of {read_len} bytes at address 0x{addr_c:x}. (Concrete value was 0x{int_val:x})")
     else:
-        print(f"JIT STORE to address {addr}==0x{addr_c:x} pandavalue=0x{int_val:x} len: {read_len}")
+        # This is just for printing in the correct endianness
+        le_int_val = int.from_bytes(concrete_byte_val, byteorder='little')
+        logger.debug(f"JIT store {read_len} bytes to address 0x{addr_c:x}: 0x{le_int_val:x}")
+        # Now actually store the data
         state.memory.store(addr_c, int_val, endness="Iend_BE") # Set the value - Don't flip endianness on store
 
 def do_jit(state):
@@ -111,7 +111,6 @@ def do_angr(panda, env, pc):
     '''
     Given a panda state, do some symbolic execution with angr
     '''
-
     global g_env
     g_env = env
 
@@ -121,7 +120,7 @@ def do_angr(panda, env, pc):
 
     # Explore
     start_state = project.factory.blank_state(addr=pc)
-    #start_state.options.add(angr.options.SYMBOL_FILL_UNCONSTRAINED_MEMORY) # Silence warnings on symbolic data
+    start_state.options.add(angr.options.SYMBOL_FILL_UNCONSTRAINED_MEMORY) # Silence warnings on symbolic data
 
     # Copy concrete registers into angr from panda
     for (angr_reg, panda_reg) in zip([x.lower() for x in registers.keys()], registers.values()):
@@ -155,46 +154,64 @@ def do_angr(panda, env, pc):
 
     return soln_s
 
-
-done = False
-@panda.cb_before_block_exec(procname="foo")
+@panda.cb_before_block_exec(procname=progname)
 def bbe(env, tb):
-    global buffer_addr, done
+    global buffer_addr, found_input
     pc = panda.current_pc(env)
 
     if pc == BUFFER_SET:
         buffer_addr = env.env_ptr.regs[R_EAX]
-        print(f"Buffer is at 0x{buffer_addr:x}")
+        logger.info(f"Malloc'd buffer is at 0x{buffer_addr:x}")
 
     elif pc == START_ANGR:
+        logger.info(f"Reached 0x{pc:x}: Starting ANGR")
         assert(buffer_addr is not None), "Unset buffer address"
 
         # Switch into angr to find a solution
-        if not done: # XXX: Sometimes we'll hit this BB again- don't rerun angr
-            res = do_angr(panda, env, pc)
-            done = True
+        found_input = do_angr(panda, env, pc)
 
-            print(f"Placing solution \"{res}\" into memory at 0x{buffer_addr:x}")
-            buf = [bytes([ord(x)]) for x in res]
-            r = panda.virtual_memory_write(env, buffer_addr,  buf)
-            assert(r >= 0), f"Failed to write solution to 0x{buffer_addr:x}"
+        print(f"Placing solution \"{found_input}\" into memory at 0x{buffer_addr:x}") # XXX is that big endian?
+        buf = [bytes([ord(x)]) for x in found_input]
+        r = panda.virtual_memory_write(env, buffer_addr,  buf)
+        assert(r >= 0), f"Failed to write solution to memory"
 
-            #panda.disable_callback('bbe')
+        panda.disable_callback('bbe', forever=True)
+
     return 0
 
 @blocking
-def run_foo():
+def run_crackme():
     '''
     Async function to revert the guest to a booted snapshot,
     copy the toy directory in via a CD and then run the 
-    `foo` program
+    `crackme` program
     '''
     panda.revert_sync("root")
     panda.copy_to_guest("toy")
-    res = panda.run_serial_cmd("toy/foo AAAA")
-    print(f"Concrete output from PANDA: {repr(res)}")
+    concrete = panda.run_serial_cmd(f"toy/{progname} ABCD", no_timeout=True)
+    print(f"Concrete output from PANDA with mutated memory: {repr(concrete)}")
     # Note buffer contains messgae uses orig buffer, but success happens because we changed it
     panda.end_analysis()
 
-panda.queue_async(run_foo)
+print("\n====== Begin first run =====")
+panda.queue_async(run_crackme)
 panda.run()
+assert(found_input), print("Failed first analysis")
+print(f"====== Finished first run, found result {found_input} =====\n\n")
+
+
+# Now let's run the whole thing with a valid solution
+@blocking
+def run_soln():
+    global found_input
+    panda.revert_sync("root")
+    panda.copy_to_guest("toy")
+    concrete = panda.run_serial_cmd(f"toy/crackme '{found_input}'")
+    print(f"Concrete output from PANDA with soln: {repr(concrete)}")
+    # Note buffer contains messgae uses orig buffer, but success happens because we changed it
+    panda.end_analysis()
+
+print(f"====== Starting second run with solution {found_input} =====")
+panda.queue_async(run_soln)
+panda.run()
+print(f"====== Finished second run ====")

@@ -1,4 +1,4 @@
-all: toy foo
+all: toy jit crackme
 
 CFLAGS += -m32 -g -DHAVE_CONFIG_H -I. -gdwarf-2 -O0 -fno-stack-protector
 
@@ -8,7 +8,10 @@ CFLAGS += -m32 -g -DHAVE_CONFIG_H -I. -gdwarf-2 -O0 -fno-stack-protector
 toy: toy.c
 	$(CC) $(CFLAGS) -o $@ $<
 
-foo: foo.c
+jit: jit.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+crackme: crackme.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 install:
@@ -16,4 +19,4 @@ install:
 	cp toy lava-install/bin
 
 clean:
-	rm -f toy foo
+	rm -f toy jit crackme
