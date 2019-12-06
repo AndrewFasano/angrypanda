@@ -219,7 +219,12 @@ def code_jit(state):
     # Copy up to max_read_length bytes into angr's memory
     # If angr already has data somewhere in this space, don't replace it
 
-    last_copy_start = addr
+    for this_addr in range(addr, addr+max_read_length): #XXX: Inefficient, should chunk
+        if this_addr not in state.memory: # Found an object, write last chunk of data
+            state.memory.store(this_addr, concrete_byte_val[this_addr-addr], 1)
+
+    """
+    last_copy_start = addr-1
     last_copied = False
     for this_addr in range(addr, addr+max_read_length):
         if this_addr in state.memory: # Found an object, write last chunk of data
@@ -227,8 +232,9 @@ def code_jit(state):
 
             if last_copy_start != this_addr-1: # There was non-angr data prior to this chunk
                 print(f"Copy {this_addr - last_copy_start} bytes of data (0x{last_copy_start:x}-0x{this_addr:x})")
-                byte_vals = int.from_bytes(concrete_byte_val[last_copy_start-addr:this_addr-addr], byteorder='big')
-                state.memory.store(last_copy_start, concrete_byte_val, this_addr-last_copy_start)
+                if last_copy_start != addr-1: # Happens if first value is in angr
+                    byte_vals = int.from_bytes(concrete_byte_val[last_copy_start-addr+1:this_addr-addr], byteorder='big')
+                    state.memory.store(last_copy_start, concrete_byte_val, this_addr-last_copy_start-1)
                 last_copied=True
             last_copy_start = this_addr
 
@@ -237,6 +243,7 @@ def code_jit(state):
         print(f"Copy {this_addr - last_copy_start} bytes of data (0x{last_copy_start:x}-0x{this_addr:x})")
         byte_vals = int.from_bytes(concrete_byte_val[last_copy_start-addr:this_addr-addr], byteorder='big')
         state.memory.store(last_copy_start, concrete_byte_val, this_addr-last_copy_start)
+    """
 
     #logger.debug(f"JIT store 0x{read_len:x} bytes of code at 0x{addr:x}")
     #concrete_byte_val = panda.virtual_memory_read(g_env, addr, read_len)
@@ -300,7 +307,9 @@ def do_angr(panda, env, pc):
     simgr = project.factory.simulation_manager(start_state)
     simgr.explore(find=FIND_ADDR, avoid=[AVOID])
 
-    assert(len(simgr.found)), f"Failed to find solution in {simgr}"
+    assert(len(simgr.found)), d() #f"Failed to find solution in {simgr}"
+    if len(simgr.errored):
+        print(simgr.errored[0])
 
     final_state = simgr.found[0]
     # Constrain each character in solution to be ascii
