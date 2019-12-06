@@ -218,40 +218,39 @@ def code_jit(state):
 
     # Copy up to max_read_length bytes into angr's memory
     # If angr already has data somewhere in this space, don't replace it
-
-    for this_addr in range(addr, addr+max_read_length): #XXX: Inefficient, should chunk
+    """
+    #XXX: Inefficient, should chunk
+    for this_addr in range(addr, addr+max_read_length):
         if this_addr not in state.memory: # Found an object, write last chunk of data
             state.memory.store(this_addr, concrete_byte_val[this_addr-addr], 1)
-
     """
-    last_copy_start = addr-1
-    last_copied = False
+
+    # Copy chunks of data that needs to go into angr
+    def _store(base, start, end): # Copy data from panda's memory into angrs for this range
+        byte_vals = int.from_bytes(concrete_byte_val[start-base:end-base], byteorder='big')
+        state.memory.store(start, byte_vals, len(byte_vals))
+        logger.debug(f"JIT store 0x{len(byte_vals):x} bytes of code at 0x{start:x}")
+
+    copy_start = None
     for this_addr in range(addr, addr+max_read_length):
-        if this_addr in state.memory: # Found an object, write last chunk of data
-            #print(f"Found existing object in angr memory at 0x{this_addr:x}")
+        if this_addr in angr_mem.keys(): # Don't need this, it's in angr mem
+            if copy_start is not None: # Copy from copy_start to here-1
+                _store(addr, copy_start, this_addr-1) # XXX: Don't store this_addr
+                copy_start = Non
+        else: # Not in angr mem
+            if copy_start is None: # Start of mem we need to copy
+                copy_start = this_addr
 
-            if last_copy_start != this_addr-1: # There was non-angr data prior to this chunk
-                print(f"Copy {this_addr - last_copy_start} bytes of data (0x{last_copy_start:x}-0x{this_addr:x})")
-                if last_copy_start != addr-1: # Happens if first value is in angr
-                    byte_vals = int.from_bytes(concrete_byte_val[last_copy_start-addr+1:this_addr-addr], byteorder='big')
-                    state.memory.store(last_copy_start, concrete_byte_val, this_addr-last_copy_start-1)
-                last_copied=True
-            last_copy_start = this_addr
+    if copy_start: # Must copy last region if we end on memory that needs a copy
+        if copy_start is not None:
+            _store(addr, copy_start, this_addr) # XXX: Do store the last `this_addr`
 
-    # If the memory region doesn't end in an angr-mapped region, we now need to finish copying
-    if last_copy_start != this_addr: # There was non-angr data prior to this
-        print(f"Copy {this_addr - last_copy_start} bytes of data (0x{last_copy_start:x}-0x{this_addr:x})")
-        byte_vals = int.from_bytes(concrete_byte_val[last_copy_start-addr:this_addr-addr], byteorder='big')
-        state.memory.store(last_copy_start, concrete_byte_val, this_addr-last_copy_start)
-    """
-
-    #logger.debug(f"JIT store 0x{read_len:x} bytes of code at 0x{addr:x}")
     #concrete_byte_val = panda.virtual_memory_read(g_env, addr, read_len)
 
 def should_code_jit(state):
     '''
     Given an address and the (maximum) size of the code there,
-    return if any data is missing from angr's memory
+    return true if any data in that range is missing from angr's memory
     '''
     base_addr = state.inspect.mem_read_address
     if not base_addr:
