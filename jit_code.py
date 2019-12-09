@@ -228,15 +228,15 @@ def code_jit(state):
     # Copy chunks of data that needs to go into angr
     def _store(base, start, end): # Copy data from panda's memory into angrs for this range
         byte_vals = int.from_bytes(concrete_byte_val[start-base:end-base], byteorder='big')
-        state.memory.store(start, byte_vals, len(byte_vals))
-        logger.debug(f"JIT store 0x{len(byte_vals):x} bytes of code at 0x{start:x}")
+        state.memory.store(start, byte_vals, end-start)
+        logger.debug(f"JIT store 0x{(end-start):x} bytes of code at 0x{start:x}")
 
     copy_start = None
     for this_addr in range(addr, addr+max_read_length):
-        if this_addr in angr_mem.keys(): # Don't need this, it's in angr mem
+        if this_addr in state.memory: # Don't need this, it's in angr mem
             if copy_start is not None: # Copy from copy_start to here-1
                 _store(addr, copy_start, this_addr-1) # XXX: Don't store this_addr
-                copy_start = Non
+                copy_start = None
         else: # Not in angr mem
             if copy_start is None: # Start of mem we need to copy
                 copy_start = this_addr
