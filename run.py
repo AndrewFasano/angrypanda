@@ -38,16 +38,16 @@ FIND_ADDR  = 0x80485aa # Before print success
 AVOID      = 0x80485bc # Before print failure
 END_MAIN   = 0x80485d7 # Main's ret
 
-# From https://github.com/eliben/pyelftools/blob/master/examples/dwarf_decode_address.py
 from elftools.common.py3compat import maxint, bytes2str
 from elftools.dwarf.descriptions import describe_form_class
 from elftools.elf.elffile import ELFFile
 
-f = open("toy/jit", 'rb')
+f = open("crackme/crackme", 'rb')
 elffile = ELFFile(f)
 assert(elffile.has_dwarf_info()), "Missing DWARF info"
 dwarfinfo = elffile.get_dwarf_info()
 
+# Some dwarf parsing code is from https://github.com/eliben/pyelftools/blob/master/examples/dwarf_decode_address.py
 namemap = {} # Addr range as tuple: name
 linemap = {} # Addr range as tuple: line
 for CU in dwarfinfo.iter_CUs():
@@ -325,7 +325,7 @@ def do_angr(panda, env, pc):
 
     return soln_s
 
-@panda.cb_before_block_exec(procname="jit")
+@panda.cb_before_block_exec(procname="crackme")
 def bbe(env, tb):
     global buffer_addr, found_input
     pc = panda.current_pc(env)
@@ -359,11 +359,11 @@ def run_crackme():
     '''
     Async function to revert the guest to a booted snapshot,
     copy the crackme directory in via a CD and then run the
-    `crackme2` program which has a function call
+    `crackme` program which has a function call
     '''
     panda.revert_sync("root")
     panda.copy_to_guest("crackme")
-    concrete = panda.run_serial_cmd("crackme/crackme2 ABCD", no_timeout=True)
+    concrete = panda.run_serial_cmd("crackme/crackme ABCD", no_timeout=True)
     print(f"Concrete output from PANDA with mutated memory: {repr(concrete)}")
     # Note buffer contains messgae uses orig buffer, but success happens because we changed it
     panda.end_analysis()
@@ -381,7 +381,7 @@ def run_soln():
     global found_input
     panda.revert_sync("root")
     panda.copy_to_guest("crackme")
-    concrete = panda.run_serial_cmd(f"crackme/crackme2 '{found_input}'")
+    concrete = panda.run_serial_cmd(f"crackme/crackme '{found_input}'")
     print(f"Concrete output from PANDA with soln: {repr(concrete)}")
     # Note buffer contains messgae uses orig buffer, but success happens because we changed it
     panda.end_analysis()
