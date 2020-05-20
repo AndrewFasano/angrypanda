@@ -15,12 +15,9 @@ import claripy
 import struct
 import logging
 
-
 from panda import Panda, ffi, blocking
 from panda.x86.helper import *
 from io import BytesIO
-from elftools.elf.elffile import ELFFile
-from elftools.elf.sections import SymbolTableSection
 from ipdb import set_trace as d
 
 logging.basicConfig(format='%(levelname)-7s | %(asctime)-23s | %(name)-8s | %(message)s')
@@ -32,114 +29,12 @@ md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
 buffer_addr = None # Dynamically identified, address of buffer returned from malloc
 found_input = None # Dynamically computed during first run
 
-# Testing - Can we just do it with line number and JIT code copying?
-BUFFER_SET = 0x8048524 # After malloc
-FIND_ADDR  = 0x80485aa # Before print success
-AVOID      = 0x80485bc # Before print failure
-END_MAIN   = 0x80485d7 # Main's ret
-
-from elftools.common.py3compat import maxint, bytes2str
-from elftools.dwarf.descriptions import describe_form_class
-from elftools.elf.elffile import ELFFile
-
-f = open("crackme/crackme", 'rb')
-elffile = ELFFile(f)
-assert(elffile.has_dwarf_info()), "Missing DWARF info"
-dwarfinfo = elffile.get_dwarf_info()
-
-# Some dwarf parsing code is from https://github.com/eliben/pyelftools/blob/master/examples/dwarf_decode_address.py
-namemap = {} # Addr range as tuple: name
-linemap = {} # Addr range as tuple: line
-for CU in dwarfinfo.iter_CUs():
-    for DIE in CU.iter_DIEs(): # First get function names
-        try:
-            if DIE.tag == 'DW_TAG_subprogram':
-                lowpc = DIE.attributes['DW_AT_low_pc'].value
-
-                # DWARF v4 in section 2.17 describes how to interpret the
-                # DW_AT_high_pc attribute based on the class of its form.
-                # For class 'address' it's taken as an absolute address
-                # (similarly to DW_AT_low_pc); for class 'constant', it's
-                # an offset from DW_AT_low_pc.
-                highpc_attr = DIE.attributes['DW_AT_high_pc']
-                highpc_attr_class = describe_form_class(highpc_attr.form)
-                if highpc_attr_class == 'address':
-                    highpc = highpc_attr.value
-                elif highpc_attr_class == 'constant':
-                    highpc = lowpc + highpc_attr.value
-                else:
-                    print('Error: invalid DW_AT_high_pc class:',
-                          highpc_attr_class)
-                    continue
-
-                namemap[(lowpc, highpc)] =  \
-                        DIE.attributes['DW_AT_name'].value.decode("utf8")
-        except KeyError:
-            continue
-
-    for DIE in CU.iter_DIEs(): # Then get line numbers
-        # First, look at line programs to find the file/line for the address
-        lineprog = dwarfinfo.line_program_for_CU(CU)
-        prevstate = None
-        for entry in lineprog.get_entries():
-            # We're interested in those entries where a new state is assigned
-            if entry.state is None:
-                continue
-            if entry.state.end_sequence:
-                # if the line number sequence ends, clear prevstate.
-                prevstate = None
-                continue
-            # Looking for a range of addresses in two consecutive states that
-            # contain the required address.
-
-            #if prevstate and prevstate.address <= address < entry.state.address:
-
-            if prevstate:
-                linemap[(prevstate.address, entry.state.address)] = prevstate.line
-            prevstate = entry.state
-
-
-def addr_to_dbginfo(address):
-    '''
-    Given an address, return the function name and source line of code
-    '''
-    for (start, end), funcname in namemap.items():
-        if address >= start and address < end:
-            break
-        else:
-            funcname = None
-    for (start, end), line in linemap.items():
-        if address >= start and address < end:
-            break
-        else:
-            line = None
-    return (funcname, line)
-
-
-def decode_file_line(dwarfinfo, address):
-    # Go over all the line programs in the DWARF information, looking for
-    # one that describes the given address.
-    for CU in dwarfinfo.iter_CUs():
-        # First, look at line programs to find the file/line for the address
-        lineprog = dwarfinfo.line_program_for_CU(CU)
-        prevstate = None
-        for entry in lineprog.get_entries():
-            # We're interested in those entries where a new state is assigned
-            if entry.state is None:
-                continue
-            if entry.state.end_sequence:
-                # if the line number sequence ends, clear prevstate.
-                prevstate = None
-                continue
-            # Looking for a range of addresses in two consecutive states that
-            # contain the required address.
-            if prevstate and prevstate.address <= address < entry.state.address:
-                filename = lineprog['file_entry'][prevstate.file - 1].name
-                line = prevstate.line
-                return filename, line
-            prevstate = entry.state
-    return None, None
-# End from Eli
+# Settings - It would be better do do these using line numbers but good enough for this PoC
+BUFFER_SET = 0x8048557 # After malloc (add esp, 0x10)
+START_ANGR = 0x804859e # After printf buffer contains (add esp, 0x10)
+FIND_ADDR  = 0x80485e5 # Before print success (push eax=>s_success)
+AVOID      = 0x80485f9 # Before print failure (push eax=>failure)
+END_MAIN   = 0x8048611 # Main's ret (ret)
 
 def angr_insn_exec(state):
     """
@@ -206,6 +101,27 @@ def should_mem_jit(state):
     angr_mem = state.memory.mem.load_objects(addr_c, l)
 
     return len(angr_mem)==0
+
+def call_jit(state):
+    '''
+    Just before angr does a call into not yet-JIT-ed memory, load 0x100 bytes there
+    using our code_jit logic
+    '''
+    addr = state.inspect.function_address
+    state.inspect.mem_read_address = staet.solver.eval(addr)
+    state.inspect.mem_read_length = 0x100
+    code_jit(state)
+
+def should_call_jit(state):
+    '''
+    Before angr enters a call instruction, check if there's an instruction (4 bytes?) of data there
+    '''
+    addr = state.inspect.function_address
+    addr_c = state.solver.eval(addr)
+    angr_mem = state.memory.mem.load_objects(addr_c, 4)
+    return len(angr_mem)==0
+
+
 
 def code_jit(state):
     '''
@@ -283,7 +199,7 @@ def do_angr(panda, env, pc):
                                 }
                             )
 
-    # Explore
+    # Explorer
     start_state = project.factory.blank_state(addr=pc)
     #start_state.options.add(angr.options.SYMBOL_FILL_UNCONSTRAINED_MEMORY) # Silence warnings on symbolic data
 
@@ -300,6 +216,9 @@ def do_angr(panda, env, pc):
 
     # Copy code on demand as well
     start_state.inspect.b('vex_lift', condition=should_code_jit, action=code_jit, when=angr.BP_BEFORE)
+
+    # When we hit a CALL, we'll need to copy code on demand as well
+    start_state.inspect.b('call', condition=should_call_jit, action=call_jit, when=angr.BP_BEFORE)
 
     # In an angr simulation, try to find FIND_ADDR and avoid AVOID
     simgr = project.factory.simulation_manager(start_state)
@@ -329,17 +248,16 @@ def do_angr(panda, env, pc):
 def bbe(env, tb):
     global buffer_addr, found_input
     pc = panda.current_pc(env)
-
     #func, line = addr_to_dbginfo(pc) # This is a bit slow
     #if func is not None:
     #    print(f"Executing basic block starting in function {func} at line {line}")
 
-    if pc == BUFFER_SET:
+    if pc == BUFFER_SET: # When malloc returns, grab the address so we can keep it symbolic for later
         buffer_addr = env.env_ptr.regs[R_EAX]
         logger.info(f"Malloc'd buffer is at 0x{buffer_addr:x}")
 
-    #elif func =="main" and line == 26:
-    elif pc == 0x8048569:
+        #elif func =="main" and line == 26:
+    elif pc == START_ANGR:
         logger.info(f"Reached 0x{pc:x}: Starting ANGR")
         assert(buffer_addr is not None), "Unset buffer address"
 
@@ -351,8 +269,6 @@ def bbe(env, tb):
         assert(r >= 0), f"Failed to write solution to memory"
 
         panda.disable_callback('bbe', forever=True)
-
-    return 0
 
 @blocking
 def run_crackme():
@@ -390,5 +306,3 @@ print(f"====== Starting second run with solution {found_input} =====")
 panda.queue_async(run_soln)
 panda.run()
 print(f"====== Finished second run ====")
-
-f.close()

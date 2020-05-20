@@ -1,6 +1,6 @@
 all: crackme
 
-CFLAGS += -m32 -g -DHAVE_CONFIG_H -I. -gdwarf-2 -O0 -fno-stack-protector
+CFLAGS += -m32 -g -DHAVE_CONFIG_H -I. -gdwarf-2 -O0 -fno-stack-protector -no-pie
 
 %.o : %.c
 	$(CC) $(CFLAGS) -c $<  -o $@  
