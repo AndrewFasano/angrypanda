@@ -108,7 +108,7 @@ def call_jit(state):
     using our code_jit logic
     '''
     addr = state.inspect.function_address
-    state.inspect.mem_read_address = staet.solver.eval(addr)
+    state.inspect.mem_read_address = state.solver.eval(addr)
     state.inspect.mem_read_length = 0x100
     code_jit(state)
 
