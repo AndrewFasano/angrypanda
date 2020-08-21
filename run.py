@@ -287,7 +287,7 @@ def run_crackme():
 print("\n====== Begin first run =====")
 panda.queue_async(run_crackme)
 panda.run()
-assert(found_input), print("Failed first analysis")
+assert(found_input), print("Failed first analysis - Try running again?")
 print(f"====== Finished first run, found result {found_input} =====\n\n")
 
 
