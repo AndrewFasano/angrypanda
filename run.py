@@ -244,7 +244,7 @@ def do_angr(panda, env, pc):
 
     return soln_s
 
-@panda.cb_before_block_exec(procname="crackme")
+@panda.cb_before_block_exec #(procname="crackme") # TODO: fix procname filter, but it's unnecessary here
 def bbe(env, tb):
     global buffer_addr, found_input
     pc = panda.current_pc(env)
