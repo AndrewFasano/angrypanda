@@ -15,8 +15,7 @@ import claripy
 import struct
 import logging
 
-from panda import Panda, ffi, blocking
-from panda.x86.helper import *
+from pandare import Panda, blocking
 from io import BytesIO
 from ipdb import set_trace as d
 
@@ -25,6 +24,7 @@ logger = logging.getLogger('angrypanda')
 logger.setLevel('DEBUG')
 
 panda = Panda(generic="i386")
+
 md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
 buffer_addr = None # Dynamically identified, address of buffer returned from malloc
 found_input = None # Dynamically computed during first run
@@ -204,10 +204,9 @@ def do_angr(panda, env, pc):
     #start_state.options.add(angr.options.SYMBOL_FILL_UNCONSTRAINED_MEMORY) # Silence warnings on symbolic data
 
     # Copy concrete registers into angr from panda
-    for (angr_reg, panda_reg) in zip([x.lower() for x in registers.keys()], registers.values()):
-        val = env.env_ptr.regs[panda_reg]
-        setattr(start_state.regs, angr_reg, val)
-
+    for reg in panda.arch.registers.keys():
+        val = panda.arch.get_reg(env, reg)
+        setattr(start_state.regs, reg.lower(), val)
     # Debugigng: print all instructions
     start_state.inspect.b('instruction', action=angr_insn_exec, when=angr.BP_BEFORE)
 
@@ -253,7 +252,7 @@ def bbe(env, tb):
     #    print(f"Executing basic block starting in function {func} at line {line}")
 
     if pc == BUFFER_SET: # When malloc returns, grab the address so we can keep it symbolic for later
-        buffer_addr = env.env_ptr.regs[R_EAX]
+        buffer_addr = panda.arch.get_reg(env, "eax")
         logger.info(f"Malloc'd buffer is at 0x{buffer_addr:x}")
 
         #elif func =="main" and line == 26:
@@ -270,7 +269,7 @@ def bbe(env, tb):
 
         panda.disable_callback('bbe', forever=True)
 
-@blocking
+@panda.queue_blocking
 def run_crackme():
     '''
     Async function to revert the guest to a booted snapshot,
@@ -285,7 +284,6 @@ def run_crackme():
     panda.end_analysis()
 
 print("\n====== Begin first run =====")
-panda.queue_async(run_crackme)
 panda.run()
 assert(found_input), print("Failed first analysis - Try running again?")
 print(f"====== Finished first run, found result {found_input} =====\n\n")

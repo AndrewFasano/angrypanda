@@ -10,11 +10,5 @@ Example script showing how to switch from a concrete execution of a PANDA guest 
 * Restarts concrete execution from the beginning and runs crackme with given solution from the start
 
 # Setup
-
-Install angr using github.com/angr/angr-dev
-Download panda (with python interface) from github.com/panda-re/panda
-
-Run `workon angr` then cd to panda/panda/pypanda/ and run `python setup.py install`.
-Now your virtual environment (named angr) should have the latest version of angr and panda with it's python interface.
-
-Note this assumes python is python3, if it isn't, update the commands accordingly.
+1) Install PANDA from source and install the pandare python package.
+2) Install angrypanda requirements with `pip install -r requirements.txt`
