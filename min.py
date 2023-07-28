@@ -3,21 +3,32 @@ import claripy
 import keystone
 import capstone
 import io
+import os
 
-START_PC = 0x4000
+from pandare import Panda
+from angrypanda import AngryPanda
+
+START_PC = 0x1000
 EXPLORE_GOAL  = START_PC + 0xE # Address to find with angr
 EXPLORE_AVOID = START_PC + 0x10 # Address to avoid
-sym_addr = 0xFFFF # Address to leave as symbolic
-shellcode  = [b"mov eax, 0xcccc",          # +0x00
+
+COND_TRUE = False # Should concrete execution hit the true or false branch?
+
+sym_addr = 0x4010 # Address to leave as symbolic
+shellcode  = [b"mov eax, 0x4000",          # +0x00
               b"mov ebx, DWORD PTR [eax]", # +0x05
               b"mov ecx, DWORD PTR [ebx]", # +0x07
               b"cmp ecx, 0x45",            # +0x09
-              b"jne 0x4010",               # +0x0C
-              b"jmp 0x4011",               # +0x0E Only hit when mem:0xFFFF==0x45
-              b"nop",                      # +0x10 Only hit when mem0xFFFF!=0x45
-              b"nop",                      # +0x11 hit always
-              b"nop",                      # Junk so angr doesn't
-              b"nop",                      # think there are symbolic insns
+              b"jne 0x1010",               # +0x0C
+              b"jmp 0x1012",               # +0x0E Only hit when mem:0xFFFF==0x45
+              b"xor edx, edx",             # +0x10 Only hit when mem0xFFFF!=0x45
+              b"nop",                      # +0x12 hit always
+              b"cmp edx, 0",               # +0x14
+              b"jnz 0x1020",               # +0x17
+              b"nop",                      # +0x18 Junk so angr doesn't
+              b"nop",                      # +0x19 think there are symbolic insns
+              b"nop",                      # +0x1a
+              b"hlt",                      # +0x1b
               ]
 
 # Shellcode will read memory at 0xCCCC, which we'll populate to be 0xFFFF through a breakpoint (JIT)
@@ -25,7 +36,6 @@ shellcode  = [b"mov eax, 0xcccc",          # +0x00
 # Then there's a branch depending on the unconstrained value
 # and an infinite loop at the end. Padded with nops so angr never reads ahead and sees symbolic code
 
-syncd_memory_addrs = set()
 
 md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
 ks = keystone.Ks(keystone.KS_ARCH_X86, keystone.KS_MODE_32)
@@ -34,89 +44,75 @@ insns, i_count = ks.asm(b";".join(shellcode), START_PC)
 if i_count != len(shellcode):
     raise RuntimeError("Failed to compile input")
 
-asm = b"".join([bytes([x]) for x in insns])
+stop_addr = START_PC + 0x1b
 
-# Load shellcode into an angr project
-proj = angr.Project(io.BytesIO(asm),
-                    main_opts={'backend': 'blob', 'arch': 'i386', 'base_addr': START_PC})
+print("INSNS:", insns)
+print("STOP:", hex(stop_addr))
 
-start_state = proj.factory.blank_state(addr=START_PC)
-start_state.options.add(angr.options.SYMBOL_FILL_UNCONSTRAINED_MEMORY)
+# Convert insns from list of ints to bytes
+insns = [bytes([x]) for x in insns]
 
-def jit_store(state):
-    addr = state.inspect.mem_read_address
-    addr_c = state.solver.eval(addr)
-    l = state.inspect.mem_read_length
+# Create a machine of type 'configurable' but with just a CPU specified (no peripherals or memory maps)
+panda = Panda("i386", extra_args=["-M", "configurable", "-nographic"])
 
-    concrete_byte_val = bytes([0, 0, 0xff, 0xff])
-    byte_int_val = int.from_bytes(concrete_byte_val, byteorder='big')
+@panda.cb_after_machine_init
+def setup(cpu):
+    '''
+    After our CPU has been created, allocate memory and set starting state
+    '''
+    # map 2MB memory for this emulation
+    panda.map_memory("mymem", 0x1000, START_PC)
 
-    if l == 1:
-        mask = 0xFF
-    elif l == 4:
-        mask = 0xFFFFFFFF
+    # Write code into memory
+    panda.physical_memory_write(START_PC, insns)
+
+    panda.map_memory("mem2", 0x1000, 0x4000)
+    panda.physical_memory_write(0x4000, bytes([0x10, 0x40, 0, 0])) # Mem[0x4000] = 0x4010
+
+    if COND_TRUE: 
+        # Mem[0x4010] = 0x45
+        panda.physical_memory_write(sym_addr, bytes([0x45, 0, 0, 0])) # TRUE
     else:
-        raise RuntimeError("No mask for length {l}")
+        # Mem[0x4010] != 0x45
+        panda.physical_memory_write(sym_addr, bytes([0x40, 0, 0, 0])) # False
 
-    int_val = byte_int_val&mask
+    # Set up registers with concrete state
+    panda.arch.set_reg(cpu, "EAX", 0x1)
+    panda.arch.set_reg(cpu, "EBX", 0x2)
+    panda.arch.set_reg(cpu, "ECX", 0x3)
+    panda.arch.set_reg(cpu, "EDX", 0x12345678) # If above is true, this will end as 0
 
-    if addr_c == sym_addr:
-        print(f"JIT IGNORE: leave {l} bytes unconstrained at mem:0x{int_val:x}")
-    else:
-        print(f"JIT STORE: save value=0x{int_val:x} (len {l}) to address mem:0x{addr_c:x}")
-        state.memory.store(addr_c, int_val, size=4, endness="Iend_LE")
+    # Set starting_pc
+    panda.arch.set_pc(cpu, START_PC)
+    print(f"PC is 0x{panda.arch.get_pc(cpu):x}")
 
+panda.cb_insn_translate(lambda x,y: True)
 
-def do_jit(state):
-    global syncd_memory_addrs
-    l = state.inspect.mem_read_length
-    addr = state.inspect.mem_read_address
-    addr_c = state.solver.eval(addr)
+md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+@panda.cb_insn_exec
+def on_insn(cpu, pc):
+    '''
+    At each instruction, print capstone disassembly.
+    When we reach stop_addr, dump registers and shutdown
+    '''
+    if pc == stop_addr:
+        print("Finished execution. CPU registers are:")
+        panda.arch.dump_regs(cpu)
 
-    if addr_c > 0x4000 and addr_c < 0x5000:
-        return False
+        # TODO: we need a better way to stop execution in the middle of a basic block
+        os._exit(0)
 
-    #angr_mem = state.memory.mem.load_objects(addr_c, l)
-    #print(state.memory.load(addr_c, l, inspect=False).history)
-    if addr_c not in syncd_memory_addrs:
-        return True
-    else:
-        syncd_memory_addrs.add(addr_c)
-        return False
-
-def angr_insn_exec(state):
-    ops = []
-    for i in range(8):
-        op = state.mem[state.inspect.instruction+i]
-        if op.byte.resolved.uninitialized:
-            break
-        ops.append(op.byte.resolved.args[0])
-
-    op_bytes = b"".join([bytes([x]) for x in ops])
-    for i in md.disasm(op_bytes, state.inspect.instruction):
+    code = panda.virtual_memory_read(cpu, pc, 12)
+    for i in md.disasm(code, pc):
         print("0x%x:\t%s\t%s" %(i.address, i.mnemonic, i.op_str))
         break
 
-start_state.inspect.b('instruction', action=angr_insn_exec, when=angr.BP_BEFORE)
-start_state.inspect.b('mem_read', condition=do_jit, action=jit_store, when=angr.BP_BEFORE)
+    if pc == START_PC + 5:
+        print("DO SYMEX")
+        panda.pyplugins.ppp.AngryPanda.run_symex(cpu, pc, EXPLORE_GOAL, EXPLORE_AVOID, [sym_addr])
 
-simgr = proj.factory.simulation_manager(start_state)
-simgr.explore(find=EXPLORE_GOAL,avoid=[EXPLORE_AVOID])
+    return 0
 
-# After exploration we should have one item in `found` stash and one that's still active
-assert(len(simgr.found)),  "Nothing in found stash"
-assert(len(simgr.avoid)), "Nothing in avoid stash"
-
-# more pythonic
-found = simgr.found[0]
-found_mem = found.memory.load(sym_addr, 1)
-found_conc = found.solver.eval(found_mem)
-
-avoid = simgr.avoid[0]
-avoid_mem = avoid.memory.load(sym_addr, 1)
-avoid_conc = avoid.solver.eval(avoid_mem)
-
-assert avoid_conc != 0x45, "Avoid state incorrectly has soln value"
-assert found_conc == 0x45, "Found state doesn't have soln value"
-
-print(f"Success, found state has solution value of 0x{found_conc:x}")
+# Start PANDA running. Callback functions will be called as necessary
+panda.pyplugins.load(AngryPanda)
+panda.run()
