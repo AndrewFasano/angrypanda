@@ -109,7 +109,7 @@ def on_insn(cpu, pc):
 
     if pc == START_PC + 5:
         print("DO SYMEX")
-        panda.pyplugins.ppp.AngryPanda.run_symex(cpu, pc, EXPLORE_GOAL, EXPLORE_AVOID, [sym_addr])
+        panda.pyplugins.ppp.AngryPanda.run_symex(cpu, pc, [sym_addr])
 
     return 0
 
