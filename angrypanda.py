@@ -16,101 +16,20 @@ logging.basicConfig(format='%(levelname)-7s | %(asctime)-23s | %(name)-8s | %(me
 logger = logging.getLogger('angrypanda')
 logger.setLevel('INFO')
 
-#################
-class PandaMemoryMixin(MemoryMixin):
-    SUPPORTS_CONCRETE_LOAD = True
-    def __init__(self, *args, **kwargs):
-        self.panda = kwargs.pop('panda')
-        self.cpu = kwargs.pop('panda_cpu')
-        self.sym_buffers = kwargs.pop('sym_buffers') or []
-        return super(PandaMemoryMixin, self).__init__(*args, **kwargs)
-
-    @angr.SimStatePlugin.memo
-    def copy(self,memo, *args, **kwargs):
-        return PandaMemoryMixin(*args, panda=self.panda, panda_cpu=self.cpu, sym_buffers=self.sym_buffers, **kwargs)
-
-    def panda_read(self, addr, size=None):
-        for sym_buffer in self.sym_buffers:
-            if sym_buffer >= addr and sym_buffer < addr + size:
-                print(f"TODO: make read symbolic because {addr:x} is in {sym_buffer:x}")
-                return None
-            data = self.panda.virtual_memory_read(self.cpu, addr, size or 128)
-            return data
-        raise ValueError("No data")
-
-    def concrete_load(self, addr, size, writing=False, **kwargs) -> memoryview:
-        print(f"Concrete load mem for {size} bytes at {addr:x} with kwargs {kwargs}")
-        try:
-            rv = self.panda_read(addr, size) if size else None
-            print(f"panda read returns:  {rv}")
-            if rv:
-                return memoryview(rv), memoryview(rv) # Concrete
-            # Symbolic - TODO
-            return memoryview(b""), memoryview(b"")
-
-        except ValueError:
-            # No data from panda, not symbolic either...
-            return memoryview(b""), memoryview(b"")
-    
-    def load(self, addr, size=None, **kwargs):
-        if size:
-            kwargs['size'] = size
-        return super(PandaMemoryMixin, self).load(addr, **kwargs)
-
-class PandaDefaultMemory(PandaMemoryMixin, angr.storage.memory_mixins.DefaultFillerMixin): # XXX changed to DefaultFillerMixin from DefaultMemory which is bigger?
-    pass
-
 class PandaConcreteTarget():
     def __init__(self, *args, **kwargs):
         self.panda = kwargs.pop('panda')
         self.cpu = kwargs.pop('panda_cpu')
-        self.sym_buffers = kwargs.pop('sym_buffers') or []
         self.state = kwargs.pop('state')
         self.id='panda_concrete_mem'
 
-    def read_memory(self, addr, size, state=None) -> claripy.ast.bv.BV:
+    def read_memory(self, addr, size, state=None) -> bytes:
         # Read concrete data
         try:
             conc = self.panda.virtual_memory_read(self.cpu, addr, size)
         except ValueError:
-            if (addr, size) in self.sym_buffers:
-                # It's entirely symbolic
-                print(f"WARN: failed to read panda data at {addr:x} but it's all symbolic so we can proceed")
-                conc = [0] * size
-            else:
-                raise ValueError(f"Unable to read concrete memory at {addr:x}")
-
-        if state:
-            data = state.solver.BVV(conc, size*8)
-        else:
-            print("WARNING no state")
-            data = claripy.BVV(conc, size*8)
-        saw_sym = False
-
-        # For each of the buffers we want to keep symbolic, check if this read overlaps
-        # and if so, replace the relevant bytes with unconstrained values
-        for (sym_buffer, sym_sz) in self.sym_buffers:
-            if sym_buffer >= addr and sym_buffer < addr+size:
-                saw_sym = True
-                # The specified sym buffer is in the middle of this read
-                # First, calculate the offset into the read
-                offset = sym_buffer - addr
-                # Next, calculate the number of bytes to replace
-                replace_bytes = min(sym_sz, size - offset)
-
-                # Now create unconstrained data for the bytes we want to replace
-                bits = replace_bytes * self.state.arch.byte_width
-                name = f'mem_{addr+offset:x}'
-                uncons = self.state.solver.Unconstrained(name, bits, key=None, inspect=False, events=False)
-
-                # Now replace bytes in the bitvector with unconstrained values
-                data = data[0:offset].concat(uncons).concat(data[offset+replace_bytes:])
-
-        if saw_sym:
-            print(f"Some symbolic data: {conc} => {data}")
-        return data
-
-#################
+            raise ValueError(f"Unable to read concrete memory at {addr:x}")
+        return conc
 
 # How many blocks do we execute before giving up?
 # If we have identified multiple states, we can stop sooner with the MULTISTATE limit
@@ -156,14 +75,9 @@ class AngryPanda(PyPlugin):
         return False
 
     @PyPlugin.ppp_export
-    def run_symex(self, cpu, pc, sym_buffers):
-        '''
-        sym_buffers should be a list (sizes?) of addresses
-        to leave symbolic.  TODO: Can we specify sizes? registers?
-        '''
+    def run_symex(self, cpu, pc):
         assert(self.cpustate is None), "Already mid-symex"
         self.cpustate = cpu
-        self.sym_buffers = sym_buffers
 
         # Initialze angr - Place the next 0x100 bytes into meory from PC
         mem = self.panda.virtual_memory_read(cpu, pc, 0x200)
@@ -179,7 +93,7 @@ class AngryPanda(PyPlugin):
 
         # Create state with custom plugin for memory accesses
         start_state = project.factory.blank_state(addr=pc)
-        project.concrete_target = PandaConcreteTarget(panda=self.panda, panda_cpu=cpu, sym_buffers=sym_buffers, state=start_state)
+        project.concrete_target = PandaConcreteTarget(panda=self.panda, panda_cpu=cpu, state=start_state)
 
         # Create an instance of the SpecialFillerMixin, providing the custom fill function
         #special_filler = angr.storage.memory_mixins.SpecialFillerMixin(start_state.memory)
@@ -191,7 +105,6 @@ class AngryPanda(PyPlugin):
         #start_state.register_plugin('memory', PandaDefaultMemory(memory_id='mem',
         #                                                        panda=self.panda,
         #                                                        panda_cpu=cpu,
-        #                                                        sym_buffers=sym_buffers))
 
         #import ipdb
         #ipdb.set_trace()
@@ -224,17 +137,4 @@ class AngryPanda(PyPlugin):
         for state in simgr.active:
             constraints = state.solver.constraints
             print("For state %s, constraints are %s" % (state, constraints))
-
-            for sym_buffer in sym_buffers:
-                # Provide a concrete value for each sym_buffer
-                mem = state.memory.load(sym_buffer, 4, disable_actions=True, inspect=False)
-                res = state.solver.eval(mem)
-
-                # Byte swap res
-                res = int.from_bytes(res.to_bytes(4, byteorder='little'), byteorder='big')
-
-                # Report the memory mapping in a more readable format
-                print(f"\tSolution: set 4 bytes of memory at address 0x{sym_buffer:x} to 0x{res:x}")
-
-
         return simgr
