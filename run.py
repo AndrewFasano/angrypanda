@@ -56,7 +56,7 @@ def sbe(cpu, tb):
             return ret
 
         # Switch into angr to find a solution
-        simgr = panda.pyplugins.ppp.AngryPanda.run_symex(cpu, pc, [buffer_addr])
+        simgr = panda.pyplugins.ppp.AngryPanda.run_symex(cpu, pc, [(buffer_addr, 4)])
 
         # Given the results,
         found_inputs = []

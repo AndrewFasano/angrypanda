@@ -68,31 +68,54 @@ class PandaConcreteTarget():
         self.state = kwargs.pop('state')
         self.id='panda_concrete_mem'
 
-    def read_memory(self, addr, size, state=None):
-        for sym_buffer in self.sym_buffers:
-            if sym_buffer >= addr and sym_buffer < addr + size:
-                print(f"TODO: make read symbolic because {addr:x} is in {sym_buffer:x}")
+    def read_memory(self, addr, size, state=None) -> claripy.ast.bv.BV:
+        # Read concrete data
+        try:
+            conc = self.panda.virtual_memory_read(self.cpu, addr, size)
+        except ValueError:
+            if (addr, size) in self.sym_buffers:
+                # It's entirely symbolic
+                print(f"WARN: failed to read panda data at {addr:x} but it's all symbolic so we can proceed")
+                conc = [0] * size
+            else:
+                raise ValueError(f"Unable to read concrete memory at {addr:x}")
 
-                if type(addr) is int:
-                    name = f"{self.id}_{addr:x}"
-                else:
-                    name = 'mem'
+        if state:
+            data = state.solver.BVV(conc, size*8)
+        else:
+            print("WARNING no state")
+            data = claripy.BVV(conc, size*8)
+        saw_sym = False
 
-                bits = size * self.state.arch.byte_width
-                data = self.state.solver.Unconstrained(name, bits, key=None, inspect=False, events=False)
-                print("Returning symbolic data", data)
-                return data
+        # For each of the buffers we want to keep symbolic, check if this read overlaps
+        # and if so, replace the relevant bytes with unconstrained values
+        for (sym_buffer, sym_sz) in self.sym_buffers:
+            if sym_buffer >= addr and sym_buffer < addr+size:
+                saw_sym = True
+                # The specified sym buffer is in the middle of this read
+                # First, calculate the offset into the read
+                offset = sym_buffer - addr
+                # Next, calculate the number of bytes to replace
+                replace_bytes = min(sym_sz, size - offset)
 
-            data = self.panda.virtual_memory_read(self.cpu, addr, size or 128)
-            print(f"Success: read {size} bytes of memory at {addr:x} -> {data}")
-            return data
-        print(f"TODO: unable to read {size} bytes of memory at {addr:x}")
+                # Now create unconstrained data for the bytes we want to replace
+                bits = replace_bytes * self.state.arch.byte_width
+                name = f'mem_{addr+offset:x}'
+                uncons = self.state.solver.Unconstrained(name, bits, key=None, inspect=False, events=False)
+
+                # Now replace bytes in the bitvector with unconstrained values
+                data = data[0:offset].concat(uncons).concat(data[offset+replace_bytes:])
+
+        if saw_sym:
+            print(f"Some symbolic data: {conc} => {data}")
+        return data
+
 #################
 
 # How many blocks do we execute before giving up?
 # If we have identified multiple states, we can stop sooner with the MULTISTATE limit
-MULTISTATE_RUNCOUNT = 5
-ONESTATE_RUNCOUNT = 20
+MULTISTATE_RUNCOUNT = 10
+ONESTATE_RUNCOUNT = 100
 
 class AngryPanda(PyPlugin):
     def __init__(self, panda):
@@ -112,14 +135,14 @@ class AngryPanda(PyPlugin):
         Debug callback - Print before each instruction we execute
         """
         op_bytes = state.memory.load(state.inspect.instruction, 32, disable_actions=True, inspect=False)
-        print(f"Got memory at {state.inspect.instruction} for debug: {op_bytes}")
+        print(f"Got memory at {state.inspect.instruction:x} for debug: {op_bytes}")
         for i in self.md.disasm(op_bytes, state.inspect.instruction):
             print("[symex] 0x%x:\t%s\t%s" %(i.address, i.mnemonic, i.op_str))
             break
 
     def rununtil(self, state):
         # Stepping terminates when this fn returns True
-        print(f"Check rununtil with len active states: {len(state.active)}, runcount {self.runcount}, multistate_runcount {self.multistate_runcount}")
+        #print(f"Check rununtil with len active states: {len(state.active)}, runcount {self.runcount}, multistate_runcount {self.multistate_runcount}")
         if len(state.active) > 1:
             self.multistate_runcount += 1
             if self.multistate_runcount > MULTISTATE_RUNCOUNT:
@@ -157,6 +180,21 @@ class AngryPanda(PyPlugin):
         # Create state with custom plugin for memory accesses
         start_state = project.factory.blank_state(addr=pc)
         project.concrete_target = PandaConcreteTarget(panda=self.panda, panda_cpu=cpu, sym_buffers=sym_buffers, state=start_state)
+
+        # Create an instance of the SpecialFillerMixin, providing the custom fill function
+        #special_filler = angr.storage.memory_mixins.SpecialFillerMixin(start_state.memory)
+        #special_filler.special_fill = custom_fill
+
+        ## Optionally, you can replace the memory plugin with your special filler instance
+        #start_state.register_plugin('memory', special_filler)
+        
+        #start_state.register_plugin('memory', PandaDefaultMemory(memory_id='mem',
+        #                                                        panda=self.panda,
+        #                                                        panda_cpu=cpu,
+        #                                                        sym_buffers=sym_buffers))
+
+        #import ipdb
+        #ipdb.set_trace()
 
         # Copy concrete registers into angr from panda - Could also do in PandaConcreteTarget?
         for reg in self.panda.arch.registers.keys():
