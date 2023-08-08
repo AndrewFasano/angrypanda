@@ -3,6 +3,47 @@
 import angr
 import sys
 
+from angr.storage.memory_object import SimMemoryObject, SimLabeledMemoryObject
+from angr.state_plugins.plugin import SimStatePlugin
+from angr.storage.memory_mixins import MemoryMixin
+from angr import options
+
+class PandaMemoryMixin(MemoryMixin):
+    SUPPORTS_CONCRETE_LOAD = True
+    def __init__(self, *args, **kwargs):
+        self.panda = kwargs.pop('panda')
+        self.cpu = kwargs.pop('panda_cpu')
+        self.sym_buffers = kwargs.pop('sym_buffers') or []
+        return super(PandaMemoryMixin, self).__init__(*args, **kwargs)
+
+    @angr.SimStatePlugin.memo
+    def copy(self,memo, *args, **kwargs):
+        return PandaMemoryMixin(*args, panda=self.panda, panda_cpu=self.cpu, sym_buffers=self.sym_buffers, **kwargs)
+
+    def concrete_load(self, addr, size, writing=False, **kwargs) -> memoryview:
+        print(f"Ignoring load of {addr:x}")
+        return memoryview(b"")
+
+    def _default_value(self, addr, size, name=None, inspect=True, events=True, key=None, **kwargs):
+        print(f"Ignoring default for {addr:x}")
+        return None
+
+    def load(self, addr, size=None, **kwargs):
+        if size:
+            kwargs['size'] = size
+        rv = super(PandaMemoryMixin, self).load(addr, **kwargs)
+        print(f"L: {addr:x} {size:x} => {rv}")
+        return rv
+
+class PandaDefaultMemory(PandaMemoryMixin, angr.storage.memory_mixins.DefaultMemory):
+    pass
+
+class MyMemoryMixin(MemoryMixin):
+    pass
+
+class MyDefaultMemory(MyMemoryMixin, angr.storage.memory_mixins.DefaultMemory):
+    pass
+
 # Look at fauxware.c! This is the source code for a "faux firmware" (@zardus
 # really likes the puns) that's meant to be a simple representation of a
 # firmware that can authenticate users but also has a backdoor - the backdoor
@@ -26,7 +67,11 @@ def basic_symbolic_execution():
     # or full_init_state, which performs a slow and pedantic initialization of
     # program state as it would execute through the dynamic loader.
 
-    state = p.factory.entry_state()
+    #state = p.factory.blank_state(plugins={'memory': PandaDefaultMemory(memory_id='mem', panda=None, panda_cpu=None, sym_buffers=None, stack_end=0x7ffffffffff0000)})
+    #state = p.factory.blank_state(plugins={'memory': MyDefaultMemory()})
+    #state = p.factory.blank_state(plugins={'memory': angr.storage.memory_mixins.DefaultMemory(memory_id='mem', stack_end=0x7ffffffffff0000)})
+    state = p.factory.blank_state()
+    state.register_plugin("memory", PandaDefaultMemory(memory_id='mem2', panda=None, panda_cpu=None, sym_buffers=None, stack_end=0x7ffffffffff0000))
 
     # Now, in order to manage the symbolic execution process from a very high
     # level, we have a SimulationManager. SimulationManager is just collections
@@ -47,6 +92,8 @@ def basic_symbolic_execution():
     # we reach a branch statement for which both branches are satisfiable.
 
     sm.run(until=lambda sm_: len(sm_.active) > 1)
+    if len(sm.errored):
+        print(sm.errored[0])
 
     # If you look at the C code, you see that the first "if" statement that the
     # program can come across is comparing the result of the strcmp with the
